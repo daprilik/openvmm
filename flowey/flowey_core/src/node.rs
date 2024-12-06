@@ -38,6 +38,7 @@ pub mod user_facing {
     pub use super::FlowArch;
     pub use super::FlowBackend;
     pub use super::FlowNode;
+    pub use super::FlowNodeBase;
     pub use super::FlowPlatform;
     pub use super::FlowPlatformKind;
     pub use super::ImportCtx;
@@ -53,6 +54,7 @@ pub mod user_facing {
     pub use super::WriteVar;
     pub use crate::flowey_request;
     pub use crate::new_flow_node;
+    pub use crate::new_flow_node_base;
     pub use crate::new_simple_flow_node;
     pub use crate::node::FlowPlatformLinuxDistro;
 
@@ -627,6 +629,11 @@ impl ImportCtx<'_> {
     pub fn import<N: FlowNodeBase + 'static>(&mut self) {
         self.backend.on_possible_dep(NodeHandle::from_type::<N>())
     }
+
+    pub fn import_unchecked<T: 'static>(&mut self, _: T) {
+        self.backend
+            .on_possible_dep(NodeHandle::from_type_unchecked::<T>())
+    }
 }
 
 pub fn new_import_ctx(backend: &mut dyn ImportCtxBackend) -> ImportCtx<'_> {
@@ -834,6 +841,7 @@ const NO_ADO_INLINE_SCRIPT: Option<
 > = None;
 
 /// Context object for a `FlowNode`.
+#[derive(Clone)]
 pub struct NodeCtx<'a> {
     backend: Rc<RefCell<&'a mut dyn NodeCtxBackend>>,
 }
@@ -844,7 +852,7 @@ impl<'backend> NodeCtx<'backend> {
     /// As a convenience feature, this function returns a special _optional_
     /// [`ReadVar<SideEffect>`], which will not result in a "unused variable"
     /// error if no subsequent step ends up claiming it.
-    pub fn emit_rust_step<F, G>(&mut self, label: impl AsRef<str>, code: F) -> ReadVar<SideEffect>
+    pub fn emit_rust_step<F, G>(&self, label: impl AsRef<str>, code: F) -> ReadVar<SideEffect>
     where
         F: for<'a> FnOnce(&'a mut StepCtx<'_>) -> G,
         G: for<'a> FnOnce(&'a mut RustRuntimeServices<'_>) -> anyhow::Result<()> + 'static,
@@ -887,7 +895,7 @@ impl<'backend> NodeCtx<'backend> {
     /// let read_foo = ctx.emit_rust_stepv("foo", |ctx| |rt| get_foo());
     /// ```
     #[must_use]
-    pub fn emit_rust_stepv<T, F, G>(&mut self, label: impl AsRef<str>, code: F) -> ReadVar<T>
+    pub fn emit_rust_stepv<T, F, G>(&self, label: impl AsRef<str>, code: F) -> ReadVar<T>
     where
         T: Serialize + DeserializeOwned + 'static,
         F: for<'a> FnOnce(&'a mut StepCtx<'_>) -> G,
@@ -1210,7 +1218,7 @@ impl<'backend> NodeCtx<'backend> {
     }
 
     /// Set a request on a particular node.
-    pub fn req<R>(&mut self, req: R)
+    pub fn req<R>(&self, req: R)
     where
         R: IntoRequest + 'static,
     {
@@ -2120,6 +2128,10 @@ impl NodeHandle {
         NodeHandle(std::any::TypeId::of::<N>())
     }
 
+    pub fn from_type_unchecked<N: 'static>() -> NodeHandle {
+        NodeHandle(std::any::TypeId::of::<N>())
+    }
+
     pub fn from_modpath(modpath: &str) -> NodeHandle {
         node_luts::erased_node_by_modpath().get(modpath).unwrap().0
     }
@@ -2293,6 +2305,51 @@ macro_rules! new_flow_node_base {
         pub struct Node;
 
         mod _only_one_call_to_flowey_node_per_module {
+            const _: () = {
+                use $crate::node::private::linkme;
+
+                fn new_erased() -> Box<dyn $crate::node::FlowNodeBase<Request = Box<[u8]>>> {
+                    Box::new($crate::node::erased::ErasedNode(super::Node))
+                }
+
+                #[linkme::distributed_slice($crate::node::private::FLOW_NODES)]
+                #[linkme(crate = linkme)]
+                static FLOW_NODE: $crate::node::private::FlowNodeMeta =
+                    $crate::node::private::FlowNodeMeta {
+                        module_path: module_path!(),
+                        ctor: new_erased,
+                        get_typeid: std::any::TypeId::of::<super::Node>,
+                    };
+            };
+        }
+    };
+
+    (fn $name:ident) => {
+        /// (see module-level docs)
+        #[non_exhaustive]
+        pub struct Node;
+
+        impl $crate::node::FlowNodeBase for Node {
+            type Request = Request;
+
+            fn imports(&mut self, dep: &mut ImportCtx<'_>) {
+                $name.into_flow_node().imports(dep)
+            }
+
+            fn emit(
+                &mut self,
+                requests: Vec<Self::Request>,
+                ctx: &mut NodeCtx<'_>,
+            ) -> anyhow::Result<()> {
+                $name.into_flow_node().emit(requests, ctx)
+            }
+
+            fn i_know_what_im_doing_with_this_manual_impl(&mut self) {}
+        }
+
+        mod _only_one_call_to_flowey_node_per_module {
+            use super::IntoFlowNode;
+
             const _: () = {
                 use $crate::node::private::linkme;
 
